@@ -1,0 +1,146 @@
+version: '3.8'
+
+networks:
+  manga-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  milvus_data:
+  redis_data:
+  uploads_data:
+  logs_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: manga-postgres
+    environment:
+      POSTGRES_USER: manga
+      POSTGRES_PASSWORD: manga123
+      POSTGRES_DB: manga_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - manga-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manga"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: manga-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - manga-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  milvus:
+    image: milvusdb/milvus:2.4-latest
+    container_name: manga-milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - manga-network
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: "/var/lib/milvus/etcd"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: manga-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - uploads_data:/app/uploads
+      - logs_data:/app/logs
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql+asyncpg://manga:manga123@postgres:5432/manga_agent
+      - REDIS_URL=redis://redis:6379/0
+      - MILVUS_HOST=milvus
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    networks:
+      - manga-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: manga-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - manga-network
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: manga-celery-worker
+    command: celery -A app.tasks.celery_app worker -l info -Q agent,cleanup --concurrency=4
+    volumes:
+      - uploads_data:/app/uploads
+      - logs_data:/app/logs
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql+asyncpg://manga:manga123@postgres:5432/manga_agent
+      - REDIS_URL=redis://redis:6379/0
+      - MILVUS_HOST=milvus
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - manga-network
+    restart: unless-stopped
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: manga-celery-beat
+    command: celery -A app.tasks.celery_app beat -l info
+    volumes:
+      - logs_data:/app/logs
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql+asyncpg://manga:manga123@postgres:5432/manga_agent
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - manga-network
+    restart: unless-stopped

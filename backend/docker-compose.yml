@@ -1,0 +1,105 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: manga-postgres
+    environment:
+      POSTGRES_USER: manga
+      POSTGRES_PASSWORD: manga123
+      POSTGRES_DB: manga_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manga -d manga_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - manga-network
+
+  milvus:
+    image: milvusdb/milvus:v2.4.5
+    container_name: manga-milvus
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: "/var/lib/milvus/etcd"
+      COMMON_STORAGETYPE: "local"
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9091/health | grep -q OK || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - manga-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: manga-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - manga-network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: manga-backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://manga:manga123@postgres:5432/manga_agent
+      DATABASE_SYNC_URL: postgresql+psycopg2://manga:manga123@postgres:5432/manga_agent
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-your-api-key}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - manga-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: manga-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - manga-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  milvus_data:
+  redis_data:
+
+networks:
+  manga-network:
+    driver: bridge

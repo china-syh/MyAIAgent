@@ -1,0 +1,117 @@
+/* ============ 全局样式 ============ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'Noto Sans SC', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============ Agent 执行状态颜色 ============ */
+
+.status-running {
+  color: #7c3aed;
+}
+
+.status-done {
+  color: #10b981;
+}
+
+.status-error {
+  color: #ef4444;
+}
+
+/* ============ 动画 ============ */
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.agent-pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.event-slide-in {
+  animation: slideIn 0.3s ease-out;
+}
+
+/* ============ 滚动条 ============ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* ============ 卡片样式 ============ */
+
+.agent-card {
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+.agent-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* ============ 步骤指示器 ============ */
+
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.step-indicator.active {
+  background: #f5f3ff;
+  border: 1px solid #7c3aed;
+}
+
+.step-indicator.completed {
+  background: #f0fdf4;
+  border: 1px solid #10b981;
+}
+
+.step-indicator.pending {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+}

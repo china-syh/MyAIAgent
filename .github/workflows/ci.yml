@@ -1,0 +1,95 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装后端依赖
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install ruff
+      - name: 代码检查
+        run: cd backend && ruff check app/
+
+  test-backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: manga
+          POSTGRES_PASSWORD: manga123
+          POSTGRES_DB: manga_agent_test
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装依赖
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx pytest-cov
+      - name: 运行测试
+        run: cd backend && python -m pytest tests/ -v --cov=app --cov-report=xml
+        env:
+          DATABASE_URL: postgresql+asyncpg://manga:manga123@localhost:5432/manga_agent_test
+          REDIS_URL: redis://localhost:6379/0
+      - name: 上传覆盖率报告
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./backend/coverage.xml
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装依赖
+        run: cd frontend && npm ci
+      - name: 构建检查
+        run: cd frontend && npm run build
+
+  build:
+    needs: [lint, test-backend, test-frontend]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建 Docker 镜像
+        run: |
+          docker compose build
+          docker tag ai-manga-agent-backend:latest ghcr.io/${{ github.repository }}/backend:latest
+          docker tag ai-manga-agent-frontend:latest ghcr.io/${{ github.repository }}/frontend:latest
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 推送镜像
+        run: |
+          docker push ghcr.io/${{ github.repository }}/backend:latest
+          docker push ghcr.io/${{ github.repository }}/frontend:latest
