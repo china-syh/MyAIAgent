@@ -382,21 +382,21 @@ const AgentMonitor: React.FC = () => {
           </Card>
 
           {/* 结果预览 */}
-          {status === 'done' && resultData?.script && (
+          {status === 'done' && resultData?.scripts?.[0] && (
             <Card
               title={<Space><FileTextOutlined />剧本摘要</Space>}
               size="small"
             >
               <Descriptions column={1} size="small">
-                <Descriptions.Item label="标题">{resultData.script.title}</Descriptions.Item>
-                <Descriptions.Item label="章节">第 {resultData.script.chapter_number} 章</Descriptions.Item>
+                <Descriptions.Item label="标题">{resultData.scripts[0].title}</Descriptions.Item>
+                <Descriptions.Item label="章节">第 {resultData.scripts[0].chapter_number} 章</Descriptions.Item>
                 <Descriptions.Item label="状态">
-                  <Tag color="green">{resultData.script.status}</Tag>
+                  <Tag color="green">{resultData.scripts[0].status}</Tag>
                 </Descriptions.Item>
               </Descriptions>
               <Divider style={{ margin: '8px 0' }} />
               <Text type="secondary" style={{ fontSize: 13 }}>
-                {resultData.script.content?.substring(0, 120)}...
+                {resultData.scripts[0].content?.substring(0, 120)}...
               </Text>
             </Card>
           )}

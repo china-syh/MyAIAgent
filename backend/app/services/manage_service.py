@@ -302,13 +302,14 @@ class TaskService:
 
     async def _compose_video_real(self, task_id: UUID, project_id: str, episode_id: str,
                                    storyboards: list, video_plan: dict):
-        """真正的视频合成：Ken Burns动画 + 场景转场 + AI语音旁白 + 背景音乐（后台异步执行）"""
+        """真正的视频合成：Ken Burns动画 + 场景级转场 + AI语音旁白 + 背景音乐（后台异步执行）"""
         from app.database import async_session as db_session
         async with db_session() as session:
             try:
                 task_repo = TaskRepository(session)
                 service = TaskService.__new__(TaskService)
                 service.repo = task_repo
+                service.deepseek = DeepSeekService()
 
                 await service.update_progress(str(task_id), 5, 1, "正在分析视频素材...")
 
@@ -404,7 +405,7 @@ class TaskService:
                         logger.warning(f"旁白语音生成失败: {e}")
                         audio_path = None
 
-                # ===== 4. 创建带 Ken Burns 动画的视频片段（固定1920x1080画布） =====
+                # ===== 4. 创建带 Ken Burns 动画的视频片段（固定1280x720画布） =====
                 await service.update_progress(str(task_id), 40, 5, "正在创建Ken Burns动画...")
 
                 from moviepy import (
@@ -416,6 +417,9 @@ class TaskService:
                 VIDEO_W, VIDEO_H = 1280, 720  # 720p渲染（更快）
                 clips = []
                 total_duration = 0
+
+                # 预计算每个分镜的场景号，用于转场判断
+                scene_numbers = [sb.scene_number or 1 for sb in panels]
 
                 for i, (sb, img_path) in enumerate(zip(panels, image_paths)):
                     sn = sb.scene_number or 1
@@ -431,32 +435,87 @@ class TaskService:
                     clip = ImageClip(img_path, duration=duration)
                     clip = clip.resized(height=VIDEO_H)
 
-                    # 应用Ken Burns动画效果，然后用CompositeVideoClip固定画布
+                    # 应用Ken Burns动画效果（更大幅度），然后用CompositeVideoClip固定画布
                     if camera_movement == "zoom_in":
-                        # 缓慢放大：从1.0到1.12
-                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.0 + 0.12 * (t / d))])
-                        # 用画布固定尺寸，溢出部分自动裁剪（居中）
+                        # 大幅放大：从1.0到1.3（30%放大，比原来12%更明显）
+                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.0 + 0.3 * (t / d))])
                         clip = CompositeVideoClip([clip.with_position(('center', 'center'))], size=(VIDEO_W, VIDEO_H))
                     elif camera_movement == "zoom_out":
-                        # 缓慢缩小：从1.12到1.0
-                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.12 - 0.12 * (t / d))])
+                        # 大幅缩小：从1.3到1.0
+                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.3 - 0.3 * (t / d))])
                         clip = CompositeVideoClip([clip.with_position(('center', 'center'))], size=(VIDEO_W, VIDEO_H))
                     elif camera_movement == "pan":
-                        # 横向平移：图片放大到1.15倍，从左到右偏移
-                        clip = clip.with_effects([Resize(1.15)])
+                        # 横向平移：图片放大到1.2倍，水平平移范围更明显
+                        clip = clip.with_effects([Resize(1.2)])
                         clip_width = clip.w
                         if clip_width > VIDEO_W:
                             pan_range = clip_width - VIDEO_W
                             clip = clip.with_position(lambda t, d=duration, r=pan_range: (-r * (t / d), 0))
+                        else:
+                            clip = clip.with_position(('center', 'center'))
                         clip = CompositeVideoClip([clip], size=(VIDEO_W, VIDEO_H))
                     else:
-                        # static - 静止，加微小呼吸效果
-                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.0 + 0.02 * (t / d))])
+                        # static - 静止，加微小呼吸效果（1.0到1.05）
+                        clip = clip.with_effects([Resize(lambda t, d=duration: 1.0 + 0.05 * (t / d))])
                         clip = CompositeVideoClip([clip.with_position(('center', 'center'))], size=(VIDEO_W, VIDEO_H))
 
-                    # 淡入淡出效果
-                    crossfade = 0.2
-                    clip = clip.with_effects([FadeIn(crossfade), FadeOut(crossfade)])
+                    # ===== 场景级转场：按scene_number分组 =====
+                    # 相同场景内分镜：0.3s淡入淡出
+                    # 不同场景之间：0.8s长溶解转场（dissolve）
+                    prev_sn = scene_numbers[i - 1] if i > 0 else None
+                    next_sn = scene_numbers[i + 1] if i < len(panels) - 1 else None
+
+                    if i == 0:
+                        # 第一个分镜：只加淡入（0.3s）
+                        clip = clip.with_effects([FadeIn(0.3)])
+                        clip.crossfade_in = 0.0
+                        clip.crossfade_out = 0.3 if (next_sn is not None and sn != next_sn) else 0.0
+                    elif i == len(panels) - 1:
+                        # 最后一个分镜：只加淡出
+                        if sn == prev_sn:
+                            clip = clip.with_effects([FadeOut(0.3)])
+                            clip.crossfade_in = 0.0
+                            clip.crossfade_out = 0.0
+                        else:
+                            clip = clip.with_effects([FadeOut(0.8)])
+                            clip.crossfade_in = 0.0
+                            clip.crossfade_out = 0.0
+                    else:
+                        # 中间分镜：根据前后场景决定转场时长
+                        same_as_prev = (sn == prev_sn)
+                        same_as_next = (sn == next_sn)
+
+                        if same_as_prev and same_as_next:
+                            # 前后都是同场景 -> 短转场（0.3s）
+                            fade_in = 0.3
+                            fade_out = 0.3
+                            dissolve = 0.0
+                        elif not same_as_prev and same_as_next:
+                            # 进入新场景（与上一个不同场景）
+                            fade_in = 0.0
+                            fade_out = 0.3
+                            dissolve = 0.8
+                        elif same_as_prev and not same_as_next:
+                            # 即将离开场景（与下一个不同场景）
+                            fade_in = 0.3
+                            fade_out = 0.0
+                            dissolve = 0.8
+                        else:
+                            # 前后都不同（独立场景，仅一个分镜）
+                            fade_in = 0.0
+                            fade_out = 0.0
+                            dissolve = 0.8
+
+                        if fade_in > 0 and fade_out > 0:
+                            clip = clip.with_effects([FadeIn(fade_in), FadeOut(fade_out)])
+                        elif fade_in > 0:
+                            clip = clip.with_effects([FadeIn(fade_in)])
+                        elif fade_out > 0:
+                            clip = clip.with_effects([FadeOut(fade_out)])
+
+                        # 设置crossfade属性，实现溶解重叠效果
+                        clip.crossfade_in = dissolve
+                        clip.crossfade_out = dissolve
 
                     clips.append(clip)
                     total_duration += duration
@@ -464,6 +523,7 @@ class TaskService:
                 # ===== 5. 合并所有片段 =====
                 await service.update_progress(str(task_id), 60, 6, "正在合并视频片段...")
 
+                # 使用compose方法合并，自动处理交叉溶解
                 final_clip = concatenate_videoclips(clips, method="compose")
 
                 # ===== 6. 合成音频 =====
@@ -618,6 +678,7 @@ class TaskService:
                     await session.commit()
                 except:
                     pass
+
 
     async def get_pending_generations(self) -> list:
         """获取所有待处理的生成任务（image_gen 和 video_compose）"""

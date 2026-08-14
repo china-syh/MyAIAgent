@@ -1,107 +1,87 @@
-"""DeepSeek API 集成服务"""
+"""
+DeepSeek API 集成服务 —— 基于 LangChain 1.x 的课件模式重写
+ChatOpenAI(02) + with_structured_output(06) + ChatPromptTemplate(04)
+"""
 import json
 import logging
-from typing import Optional, AsyncGenerator
-from httpx import AsyncClient, Timeout
+from typing import Optional, AsyncGenerator, TypeVar, Type
+from pydantic import BaseModel
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_API_URL = f"{settings.DEEPSEEK_BASE_URL.rstrip('/')}/v1/chat/completions"
-DEEPSEEK_HEADERS = {
-    "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
-    "Content-Type": "application/json",
-}
+T = TypeVar("T", bound=BaseModel)
 
 
 class DeepSeekService:
-    """DeepSeek API 调用服务"""
+    """DeepSeek API 调用服务 —— 课件02/04/06 模式"""
 
     def __init__(self, model: str = None):
         self.model = model or settings.DEEPSEEK_MODEL
-        self.client = AsyncClient(timeout=Timeout(120.0, connect=30.0))
-
-    async def chat(
-        self,
-        messages: list,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        response_format: Optional[dict] = None,
-    ) -> str:
-        """发送聊天请求并获取回复"""
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if response_format:
-            payload["response_format"] = response_format
-
-        try:
-            resp = await self.client.post(
-                DEEPSEEK_API_URL, headers=DEEPSEEK_HEADERS, json=payload
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"DeepSeek API 调用失败: {e}")
-            raise
-
-    async def chat_stream(
-        self,
-        messages: list,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-    ) -> AsyncGenerator[str, None]:
-        """流式聊天请求"""
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": True,
-        }
-        try:
-            async with self.client.stream(
-                "POST", DEEPSEEK_API_URL, headers=DEEPSEEK_HEADERS, json=payload
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line.startswith("data: "):
-                        chunk = line[6:]
-                        if chunk == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(chunk)
-                            delta = data["choices"][0]["delta"].get("content", "")
-                            if delta:
-                                yield delta
-                        except (json.JSONDecodeError, KeyError):
-                            continue
-        except Exception as e:
-            logger.error(f"DeepSeek 流式调用失败: {e}")
-            raise
-
-    async def chat_json(self, messages: list, temperature: float = 0.3) -> dict:
-        """请求结构化 JSON 回复"""
-        content = await self.chat(
-            messages=messages,
-            temperature=temperature,
-            response_format={"type": "json_object"},
+        # 课件02(方式3): ChatOpenAI 调用 OpenAI 兼容 API
+        self.llm = ChatOpenAI(
+            model=self.model,
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            temperature=0.7,
+            max_tokens=4096,
         )
+
+    # ===== 课件02: 基础 invoke =====
+    async def chat(self, messages: list, temperature: float = 0.7) -> str:
+        """发送聊天请求并获取回复"""
+        llm = self.llm.bind(temperature=temperature)
+        response = await llm.ainvoke(messages)
+        return response.content
+
+    # ===== 课件02: 流式调用 =====
+    async def chat_stream(self, messages: list, temperature: float = 0.7) -> AsyncGenerator[str, None]:
+        """流式聊天请求"""
+        llm = self.llm.bind(temperature=temperature)
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
+    # ===== 课件06: 结构化输出 =====
+    async def chat_json(self, messages: list, temperature: float = 0.3) -> dict:
+        """请求结构化 JSON 回复 —— 使用 JsonOutputParser"""
+        from langchain_core.output_parsers import JsonOutputParser
+        parser = JsonOutputParser()
+        llm = self.llm.bind(temperature=temperature)
+        chain = llm | parser
         try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            logger.warning(f"DeepSeek 返回非 JSON 内容: {content[:200]}")
-            return {"raw": content}
+            result = await chain.ainvoke(messages)
+            return result if isinstance(result, dict) else {"raw": result}
+        except Exception as e:
+            logger.warning(f"结构化输出解析失败: {e}")
+            return {"raw": str(e)}
+
+    # ===== 课件06: Pydantic 结构化输出 =====
+    async def chat_with_schema(self, messages: list, schema: Type[T], temperature: float = 0.3) -> T:
+        """使用 with_structured_output 获取 Pydantic 结构化输出"""
+        llm = self.llm.bind(temperature=temperature)
+        structured_llm = llm.with_structured_output(schema)
+        return await structured_llm.ainvoke(messages)
+
+    # ===== 课件04: ChatPromptTemplate 模板 =====
+    @staticmethod
+    def build_prompt(system_template: str, human_template: str, **kwargs) -> list:
+        """使用 ChatPromptTemplate 构建消息"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_template),
+            ("human", human_template),
+        ])
+        return prompt.format_messages(**kwargs)
 
     async def close(self):
-        await self.client.aclose()
+        pass
 
 
-# 系统提示词
+# ===== 课件04: 系统提示词模板 =====
 SYSTEM_PROMPTS = {
     "assistant": """你是小导（Xia Director），一个专业的AI漫剧制作助手。
 你的职责是帮助用户完成漫画剧集的创作，包括：
@@ -115,43 +95,43 @@ SYSTEM_PROMPTS = {
 
     "novel_parser": """你是一个专业的小说解析专家。你的任务是从小说文本中提取结构化信息。
 请以JSON格式返回以下内容：
-{
+{{
   "title": "作品标题",
   "characters": [
-    {"name": "角色名", "description": "角色描述", "personality": "性格特征", "role": "主角/配角/反派"}
+    {{"name": "角色名", "description": "角色描述", "personality": "性格特征", "role": "主角/配角/反派"}}
   ],
   "chapters": [
-    {"number": 1, "title": "章节标题", "summary": "章节概要"}
+    {{"number": 1, "title": "章节标题", "summary": "章节概要"}}
   ],
   "themes": ["主题1", "主题2"],
   "worldview": "世界观描述",
   "genre": "作品类型"
-}
+}}
 
 注意：提取的信息要准确，角色不少于3个，章节按实际内容划分。""",
 
     "story_graph": """你是一个故事分析专家。根据提供的小说或剧本内容，分析角色之间的关系。
 请以JSON格式返回角色关系列表：
-{
+{{
   "relationships": [
-    {
+    {{
       "character_a": "角色A",
       "character_b": "角色B",
       "relationship_type": "关系类型（如：恋人/敌人/朋友/师徒/家人）",
       "description": "关系描述",
       "strength": 0.8
-    }
+    }}
   ]
-}
+}}
 
 注意：strength是0-1之间的浮点数，表示关系强度。""",
 
     "script_generator": """你是一个专业的漫画剧本创作专家。
 根据用户提供的小说章节或剧情概要，生成详细的分镜剧本。
 请以JSON格式返回：
-{
+{{
   "script": [
-    {
+    {{
       "scene_number": 1,
       "location": "场景地点",
       "time": "时间",
@@ -161,27 +141,27 @@ SYSTEM_PROMPTS = {
       "action": "动作描述",
       "camera": "镜头角度",
       "panel_description": "分镜画面描述"
-    }
+    }}
   ]
-}
+}}
 每个场景包含画面描述、对话、动作等细节。""",
 
     "style_analysis": """你是一个视觉风格分析专家。
 根据用户提供的风格描述或参考图片描述，分析视觉风格特征。
 请以JSON格式返回：
-{
+{{
   "name": "风格名称",
   "description": "风格描述",
   "color_palette": ["#色值1", "#色值2", "#色值3", "#色值4", "#色值5"],
   "lighting": "光照风格描述",
   "mood": "情绪氛围描述",
-  "style_params": {
+  "style_params": {{
     "line_weight": "线条粗细",
     "color_saturation": "色彩饱和度",
     "contrast": "对比度",
     "texture": "纹理风格"
-  }
-}""",
+  }}
+}}""",
 
     "image_prompt_enhancer": """你是一个专业的AI图像提示词优化专家。
 你的任务是根据分镜内容，生成一个高质量、详细的图像生成提示词（prompt），用于AI图像生成工具。
@@ -213,7 +193,7 @@ SYSTEM_PROMPTS = {
 - prompt: 原始提示词
 
 请分析以上信息，并以**JSON格式**返回以下结构（不要包含任何解释）：
-{
+{{
   "scene_type": "indoor/outdoor/closeup/action/landscape/abstract",
   "mood": "场景氛围，如 peaceful/tense/joyful/sad/mysterious/epic",
   "time_of_day": "morning/afternoon/evening/night/unknown",
@@ -230,36 +210,36 @@ SYSTEM_PROMPTS = {
   "camera_distance": "wide/medium/closeup",
   "color_palette_hint": "暖色系/冷色系/中性色/高对比",
   "elements": ["元素1", "元素2"]
-}""",
+}}""",
 
     "video_composition_planner": """你是一个专业的AI视频合成规划专家，同时也是一位优秀的配音编剧。
     你的任务是根据一系列分镜图片及其描述，规划一个完整的视频合成方案，并撰写旁白配音稿。
     
     请以JSON格式返回视频合成计划：
-    {
+    {{
       "total_duration": 30,
       "scene_transitions": [
-        {
+        {{
           "scene_number": 1,
           "duration": 5,
           "transition_type": "fade/cut/dissolve/zoom",
           "description": "场景描述",
           "panels": [
-            {
+            {{
               "panel_number": 1,
               "duration": 2.5,
               "camera_movement": "static/pan/zoom_in/zoom_out",
               "description": "分镜画面描述"
-            }
+            }}
           ],
           "background_music_mood": "音乐情绪",
           "sound_effects": ["音效描述"],
           "narration": "该场景的旁白配音文字，用中文撰写，富有情感和画面感，一句话概括即可"
-        }
+        }}
       ],
       "overall_style": "整体视频风格描述",
       "narration_style": "旁白风格"
-    }
+    }}
     
     注意：
     1. 每个分镜的时长建议2-3秒，总时长控制在20-30秒

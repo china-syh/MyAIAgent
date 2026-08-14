@@ -1,5 +1,6 @@
-"""Durable orchestration for the project's end-to-end production line."""
+"""Durable orchestration for the project's end-to-end production line with SSE streaming."""
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,29 @@ from app.repositories import CharacterRepository, ProductionRunRepository, Produ
 from app.services.script_service import ScriptService
 
 STAGES = ("planning", "writing", "storyboarding", "prompting", "quality")
+
+STAGE_LABELS = {
+    "planning": "故事规划",
+    "writing": "剧本生成",
+    "storyboarding": "分镜生成",
+    "prompting": "提示词优化",
+    "quality": "质量检查",
+}
+
+# 全局 SSE 事件存储（keyed by run_id）
+_sse_events: dict[str, list[dict]] = {}
+
+
+def emit_event(run_id: str, event: dict):
+    """向 SSE 事件存储中推送一条事件"""
+    if run_id not in _sse_events:
+        _sse_events[run_id] = []
+    _sse_events[run_id].append(event)
+
+
+def get_and_clear_events(run_id: str) -> list[dict]:
+    """获取并清除指定 run_id 的待处理事件"""
+    return _sse_events.pop(run_id, [])
 
 
 class ProductionService:
@@ -57,8 +81,44 @@ class ProductionService:
                             "input_data": s.input_data or {}, "output_data": s.output_data or {}, "error": s.error or "",
                             "started_at": s.started_at, "completed_at": s.completed_at} for s in stages]}
 
+    async def get_sse_stream(self, run_id: str):
+        """SSE 流生成器：持续产生阶段更新事件"""
+        run = await self.run_repo.get(UUID(run_id))
+        if not run:
+            yield f"data: {json.dumps({'type': 'error', 'message': '运行不存在'})}\n\n"
+            return
+
+        # 先发送当前状态快照
+        snapshot = await self.get(run_id)
+        if snapshot:
+            yield f"data: {json.dumps({'type': 'snapshot', 'data': snapshot})}\n\n"
+
+        # 持续轮询事件队列（最多 5 分钟）
+        max_wait = 300  # 5 分钟超时
+        waited = 0
+        while waited < max_wait:
+            events = get_and_clear_events(run_id)
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") in ("complete", "error"):
+                    return
+            # 检查是否已完成（防止事件丢失）
+            current = await self.run_repo.get(UUID(run_id))
+            if current and current.status in ("completed", "failed"):
+                if current.status == "completed":
+                    final = await self.get(run_id)
+                    yield f"data: {json.dumps({'type': 'complete', 'data': final})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'error', 'message': current.error or '运行失败'})}\n\n"
+                return
+            await asyncio.sleep(1)
+            waited += 1
+
+        yield f"data: {json.dumps({'type': 'timeout', 'message': '等待超时'})}\n\n"
+
     async def pause(self, run_id: str):
         run = await self.run_repo.update(UUID(run_id), status="paused")
+        emit_event(run_id, {"type": "paused", "message": "生产线已暂停"})
         return await self.get(run_id) if run else None
 
     async def resume(self, run_id: str):
@@ -67,6 +127,7 @@ class ProductionService:
             return None
         if run.status in {"paused", "failed"}:
             await self.run_repo.update(run.id, status="running", error="")
+            emit_event(run_id, {"type": "resumed", "message": "生产线继续运行"})
             asyncio.create_task(self._run(run_id))
         return await self.get(run_id)
 
@@ -80,6 +141,7 @@ class ProductionService:
             if item.order >= stage.order:
                 await self.stage_repo.update(item.id, status="pending", error="", output_data={}, completed_at=None)
         await self.run_repo.update(run.id, status="running", current_stage=stage_name, error="")
+        emit_event(run_id, {"type": "retry", "stage": stage_name, "message": f"重试阶段：{STAGE_LABELS.get(stage_name, stage_name)}"})
         asyncio.create_task(self._run(run_id))
         return await self.get(run_id)
 
@@ -91,11 +153,21 @@ class ProductionService:
             if not run or run.status == "paused":
                 return
             try:
-                context: dict[str, Any] = {"project_id": str(run.project_id), "story_input": run.input_snapshot.get("story_input", ""),
-                                           "genre": run.input_snapshot.get("genre", "fantasy"), "characters": []}
+                context: dict[str, Any] = {
+                    "project_id": str(run.project_id),
+                    "story_input": run.input_snapshot.get("story_input", ""),
+                    "genre": run.input_snapshot.get("genre", "fantasy"),
+                    "characters": [],
+                }
                 stage_map = {s.name: s for s in await runner.stage_repo.get_by_run(run.id)}
-                agents = {"planning": PlanningAgent(), "writing": WritingAgent(), "storyboarding": StoryboardAgent(),
-                          "prompting": PromptAgent(), "quality": QualityCheckerAgent()}
+                agents = {
+                    "planning": PlanningAgent(),
+                    "writing": WritingAgent(),
+                    "storyboarding": StoryboardAgent(),
+                    "prompting": PromptAgent(),
+                    "quality": QualityCheckerAgent(),
+                }
+
                 for name in run.input_snapshot.get("stages", list(STAGES)):
                     stage = stage_map.get(name)
                     if not stage:
@@ -103,25 +175,101 @@ class ProductionService:
                     if stage.status == "completed":
                         context.update(stage.output_data or {})
                         continue
+
                     latest = await runner.run_repo.get(run.id)
                     if not latest or latest.status == "paused":
                         return
+
+                    # 更新阶段状态为 running
                     await runner.run_repo.update(run.id, current_stage=name, status="running")
                     await runner.stage_repo.update(stage.id, status="running", started_at=datetime.now(timezone.utc), input_data=context)
+                    emit_event(run_id, {
+                        "type": "stage_start",
+                        "stage": name,
+                        "label": STAGE_LABELS.get(name, name),
+                        "message": f"正在执行：{STAGE_LABELS.get(name, name)}",
+                    })
+
+                    # 执行 Agent
                     result = await asyncio.to_thread(agents[name].run, context)
+
                     if result.get("error"):
                         await runner.stage_repo.update(stage.id, status="failed", error=result["error"])
                         await runner.run_repo.update(run.id, status="failed", error=result["error"])
                         await runner.project_repo.update(run.project_id, status="failed")
+                        emit_event(run_id, {
+                            "type": "stage_failed",
+                            "stage": name,
+                            "label": STAGE_LABELS.get(name, name),
+                            "error": result["error"],
+                            "message": f"阶段失败：{STAGE_LABELS.get(name, name)} - {result['error']}",
+                        })
                         return
+
                     context.update(result)
                     await runner._persist_stage_output(run, name, context)
                     await runner.stage_repo.update(stage.id, status="completed", output_data=result, completed_at=datetime.now(timezone.utc))
+
+                    # 提取阶段结果的摘要信息
+                    summary = runner._get_stage_summary(name, result)
+                    emit_event(run_id, {
+                        "type": "stage_complete",
+                        "stage": name,
+                        "label": STAGE_LABELS.get(name, name),
+                        "summary": summary,
+                        "message": f"完成：{STAGE_LABELS.get(name, name)}",
+                    })
+
+                # 全部完成
                 await runner.run_repo.update(run.id, status="completed", current_stage="completed", output=context, error="")
                 await runner.project_repo.update(run.project_id, status="completed")
+                emit_event(run_id, {
+                    "type": "complete",
+                    "data": await runner.get(run_id),
+                    "message": "🎉 生产线全部完成！",
+                })
+
             except Exception as exc:
                 await runner.run_repo.update(UUID(run_id), status="failed", error=str(exc))
                 await runner.project_repo.update(run.project_id, status="failed")
+                emit_event(run_id, {
+                    "type": "error",
+                    "message": f"生产线异常: {str(exc)}",
+                })
+
+    def _get_stage_summary(self, name: str, result: dict[str, Any]) -> dict:
+        """提取阶段结果的摘要信息"""
+        if name == "planning":
+            return {
+                "chapter_title": result.get("chapter_title", ""),
+                "scene_count": len(result.get("scenes", [])),
+                "character_count": len(result.get("characters", [])),
+                "world_setting": result.get("world_setting", ""),
+            }
+        elif name == "writing":
+            script = result.get("script", {})
+            scenes = script.get("scenes", []) or result.get("scenes", [])
+            return {
+                "scene_count": len(scenes),
+                "content_preview": script.get("content", "")[:100] if script.get("content") else "",
+            }
+        elif name == "storyboarding":
+            storyboards = result.get("storyboards", [])
+            return {
+                "total_panels": len(storyboards),
+                "scene_count": len(set(sb.get("scene_number", 1) for sb in storyboards)),
+            }
+        elif name == "prompting":
+            prompts = result.get("prompts", [])
+            return {"total_prompts": len(prompts)}
+        elif name == "quality":
+            report = result.get("quality_report", {})
+            return {
+                "score": report.get("score", 0),
+                "passed": report.get("passed", False),
+                "issues": report.get("issues", []),
+            }
+        return {}
 
     async def _persist_stage_output(self, run, name: str, context: dict[str, Any]):
         if name == "planning":

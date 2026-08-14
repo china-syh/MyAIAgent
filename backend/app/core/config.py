@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 import os
 
 
@@ -7,12 +7,12 @@ class Settings(BaseSettings):
     # 应用
     APP_NAME: str = "AI 漫剧 Agent"
     APP_VERSION: str = "2.0.0"
-    ENV: str = "development"  # development / staging / production
+    ENV: str = "development"
     DEBUG: bool = True
 
     # 安全
     SECRET_KEY: str = "manga-agent-secret-key-change-in-production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24小时
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     ALGORITHM: str = "HS256"
     ALLOWED_HOSTS: List[str] = ["*"]
@@ -22,21 +22,30 @@ class Settings(BaseSettings):
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
 
-    # Milvus
+    # Milvus (RAG 向量存储 — 课件10)
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530
     MILVUS_ALIAS: str = "default"
 
-    # LLM
+    # ===== 课件02: LLM 模型配置 =====
+    LLM_PROVIDER: str = "deepseek"
     OPENAI_API_KEY: str = "sk-your-api-key"
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = "gpt-4o-mini"
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
 
-    # DeepSeek
-    DEEPSEEK_API_KEY: str = "sk-your-deepseek-api-key"  # 请在 .env 中设置
+    # ===== DeepSeek =====
+    DEEPSEEK_API_KEY: str = "sk-your-deepseek-api-key"
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
     DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    # ===== 课件03: LangSmith 追踪配置 =====
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_API_KEY: Optional[str] = None
+    LANGSMITH_PROJECT: str = "ai-manga-agent"
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+
+    # ===== 课件06: 结构化输出 =====
+    STRUCTURED_OUTPUT_MODEL: str = ""
 
     # Image generation provider
     IMAGE_PROVIDER: str = "pollinations"
@@ -52,10 +61,18 @@ class Settings(BaseSettings):
 
     # 向量
     EMBEDDING_DIM: int = 1536
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    # ===== 课件10: RAG 配置 =====
+    RAG_CHUNK_SIZE: int = 500
+    RAG_CHUNK_OVERLAP: int = 50
+    RAG_DOC_LOADER: str = "pdf"
+    RAG_TOP_K: int = 3
+    RAG_COLLECTION_NAME: str = "manga_knowledge"
 
     # 文件上传
     UPLOAD_DIR: str = "uploads"
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
+    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024
     ALLOWED_EXTENSIONS: List[str] = ["jpg", "jpeg", "png", "gif", "webp", "pdf"]
 
     # CORS
