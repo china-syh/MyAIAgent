@@ -122,6 +122,9 @@ const StoryGraphPage: React.FC = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [adding, setAdding] = useState(false);
   const [hoveredRelation, setHoveredRelation] = useState<string | null>(null);
+  const [charModalVisible, setCharModalVisible] = useState(false);
+  const [addingChar, setAddingChar] = useState(false);
+  const [charForm] = Form.useForm();
   const [form] = Form.useForm();
 
   const SVG_WIDTH = 700;
@@ -602,17 +605,30 @@ const StoryGraphPage: React.FC = () => {
                   </Space>
                 }
                 extra={
-                  <Button
-                    type="primary"
-                    icon={<PlusOutlined />}
-                    onClick={() => {
-                      form.resetFields();
-                      setModalVisible(true);
-                    }}
-                    disabled={characters.length < 2}
-                  >
-                    添加关系
-                  </Button>
+                  <>
+                    <Button
+                      type="default"
+                      icon={<PlusOutlined />}
+                      onClick={() => {
+                        charForm.resetFields();
+                        setCharModalVisible(true);
+                      }}
+                      style={{ marginRight: 8 }}
+                    >
+                      添加角色
+                    </Button>
+                    <Button
+                      type="primary"
+                      icon={<PlusOutlined />}
+                      onClick={() => {
+                        form.resetFields();
+                        setModalVisible(true);
+                      }}
+                      disabled={characters.length < 2}
+                    >
+                      添加关系
+                    </Button>
+                  </>
                 }
                 bodyStyle={{ padding: 0, overflow: 'hidden' }}
               >
@@ -831,6 +847,55 @@ const StoryGraphPage: React.FC = () => {
               maxLength={200}
               showCount
             />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ===== 添加角色弹窗 ===== */}
+      <Modal
+        title="添加角色"
+        open={charModalVisible}
+        onOk={async () => {
+          try {
+            const values = await charForm.validateFields();
+            setAddingChar(true);
+            await characterApi.create(selectedProjectId!, values);
+            message.success('角色添加成功');
+            setCharModalVisible(false);
+            charForm.resetFields();
+            if (selectedProjectId) loadGraphData(selectedProjectId);
+          } catch (err: any) {
+            if (err.errorFields) return;
+            message.error('添加角色失败: ' + (err.message || ''));
+          } finally {
+            setAddingChar(false);
+          }
+        }}
+        onCancel={() => {
+          setCharModalVisible(false);
+          charForm.resetFields();
+        }}
+        confirmLoading={addingChar}
+        okText="添加"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={charForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="name" label="角色名称" rules={[{ required: true, message: '请输入角色名称' }]}>
+            <Input placeholder="例如：张三" />
+          </Form.Item>
+          <Form.Item name="role" label="角色定位">
+            <Select placeholder="选择角色定位" allowClear>
+              <Option value="主角">主角</Option>
+              <Option value="配角">配角</Option>
+              <Option value="反派">反派</Option>
+            </Select>
+          </Form.Item>
+          <Form.Item name="personality" label="性格特征">
+            <Input placeholder="例如：勇敢、善良" />
+          </Form.Item>
+          <Form.Item name="appearance" label="外貌描述">
+            <Input placeholder="例如：黑色短发，蓝色眼睛" />
           </Form.Item>
         </Form>
       </Modal>

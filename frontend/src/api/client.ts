@@ -115,6 +115,7 @@ export const novelApi = {
 // ===== 角色 =====
 export const characterApi = {
   list: (projectId: string) => http.get(`/projects/${projectId}/characters`).then(r => r.data),
+  create: (projectId: string, data: any) => http.post(`/projects/${projectId}/characters`, data).then(r => r.data),
 };
 
 // ===== 故事图谱 =====
